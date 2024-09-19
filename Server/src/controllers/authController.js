@@ -6,7 +6,6 @@ const UserRegister = async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res
@@ -14,31 +13,25 @@ const UserRegister = async (req, res) => {
         .json({ error: true, message: "User already exists..!" });
     }
 
-    // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
 
-    // Create a new user
     const user = await User.create({
       username,
       email,
       password: hashedPassword,
     });
 
-    // Generate access token and refresh token
     const accessToken = jwtHelper.signToken(user._id);
     const refreshToken = jwtHelper.signRefreshToken(user._id);
 
-    // Store the access token in an httpOnly cookie
     res.cookie("sessionToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       maxAge: 15 * 60 * 1000,
     });
 
-    // Store the refresh token in MongoDB
     await jwtHelper.storeRefreshToken(user._id, refreshToken);
 
-    // Send response with user details
     res.status(201).json({
       message: "User registered successfully",
       userId: user._id,
@@ -60,21 +53,20 @@ const login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Generate access token and refresh token
     const accessToken = jwtHelper.signToken(user._id);
     const refreshToken = jwtHelper.signRefreshToken(user._id);
 
-    // Store the access token in an httpOnly cookie
     res.cookie("sessionToken", accessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       maxAge: 15 * 60 * 1000,
     });
 
-    // Store the refresh token in MongoDB
     await jwtHelper.storeRefreshToken(user._id, refreshToken);
 
-    // Send response with user details
+    // User is now considered online, but actual status update will be done when socket connects
+    await User.findByIdAndUpdate(user._id, { online: true });
+
     res.status(200).json({
       accessToken: accessToken,
       message: "Login successful",
@@ -90,9 +82,12 @@ const login = async (req, res) => {
 
 const logout = async (req, res) => {
   try {
-    const userId = req.userId; // Assuming userId is stored in the request
-    await User.findByIdAndUpdate(userId, { refreshToken: null });
+    const userId = req.userId;
+    await User.findByIdAndUpdate(userId, { refreshToken: null, online: false });
     res.clearCookie("sessionToken");
+
+    // The socket will handle the actual offline status update
+
     res.status(200).json({ message: "Logout successful" });
   } catch (error) {
     res.status(500).json({ message: "Logout failed", error });
@@ -106,16 +101,18 @@ const refreshToken = async (req, res) => {
       return res.status(403).json({ message: "Refresh token not found." });
     }
 
-    const userId = req.userId; // Assuming userId is stored in the request
-    const storedToken = await User.findById(userId).select("refreshToken");
-    if (!storedToken || storedToken.refreshToken !== refreshToken) {
+    const userId = await jwtHelper.verifyRefreshToken(refreshToken);
+    if (!userId) {
       return res.status(403).json({ message: "Invalid refresh token." });
     }
 
-    // Generate new access token
+    const user = await User.findById(userId);
+    if (!user || user.refreshToken !== refreshToken) {
+      return res.status(403).json({ message: "Invalid refresh token." });
+    }
+
     const newAccessToken = jwtHelper.signToken(userId);
 
-    // Send the new access token in an httpOnly cookie
     res.cookie("sessionToken", newAccessToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
